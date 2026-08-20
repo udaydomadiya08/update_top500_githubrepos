@@ -33,7 +33,7 @@ jobs:
 
       - name: Run GitHub ranking update
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GROW_HUB }}
         run: |
           python github_ranker.py
 
