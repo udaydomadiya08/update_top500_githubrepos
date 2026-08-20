@@ -29,11 +29,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests openpyxl
 
-      - name: Check token
+      - name: Check GROW_HUB secret
         env:
-          GITHUB_TOKEN: ${{ secrets.GROW_HUB }}
+          MY_GITHUB_TOKEN: ${{ secrets.GROW_HUB }}
         run: |
-          if [ -z "$GITHUB_TOKEN" ]; then
+          if [ -z "$MY_GITHUB_TOKEN" ]; then
             echo "❌ GROW_HUB secret was NOT provided"
             exit 1
           else
@@ -44,6 +44,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GROW_HUB }}
         run: |
+          echo "🚀 Starting GitHub ranking program..."
           python github_ranker.py
 
       - name: Commit updated Excel
@@ -54,7 +55,7 @@ jobs:
           git add github_top_repos_by_interval.xlsx
 
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "ℹ️ No Excel changes detected."
           else
             git commit -m "Daily GitHub Top 500 update"
             git push
