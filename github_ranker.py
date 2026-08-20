@@ -2,27 +2,45 @@ import os
 import time
 import requests
 import openpyxl
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from openpyxl.utils import get_column_letter
 
 # ============================================================
-# GITHUB TOP 500 REPOSITORIES → EXCEL
+# GITHUB AGE-BASED TOP REPOSITORY RANKING
+# ============================================================
+#
+# Logic:
+#
+# Daily   = repositories <= 1 day old
+# Weekly  = repositories <= 7 days old
+# 1 Month = repositories <= 30 days old
+# 2 Months = repositories <= 60 days old
+# 3 Months = repositories <= 90 days old
+# 6 Months = repositories <= 180 days old
+# 1 Year   = repositories <= 365 days old
+# 2 Years  = repositories <= 730 days old
+# 3 Years  = repositories <= 1095 days old
+# All Time = all repositories
+#
+# Within each interval:
+#
+#       FILTER BY REPOSITORY AGE
+#                   ↓
+#       SORT BY TOTAL STARS
+#                   ↓
+#              RANK #1...
+#
 # ============================================================
 
 API_URL = "https://api.github.com/search/repositories"
+
 EXCEL_FILE = "github_top_repos_by_interval.xlsx"
+
+# Maximum repositories to put into each interval sheet
+TOP_N = 500
 
 # ============================================================
 # GITHUB TOKEN
-# ============================================================
-# GitHub Actions takes your repository secret GROW_HUB
-# and passes it to this Python program as GITHUB_TOKEN.
-#
-# Workflow:
-# GROW_HUB secret
-#       ↓
-# GITHUB_TOKEN environment variable
-#       ↓
-# Python
 # ============================================================
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
@@ -40,26 +58,46 @@ HEADERS = {
 }
 
 # ============================================================
-# FETCH TOP 500 REPOSITORIES
+# INTERVAL DEFINITIONS
 # ============================================================
 
-print("=" * 70)
-print("🚀 GITHUB TOP 500 REPOSITORY UPDATE")
-print("=" * 70)
+INTERVALS = {
+    "Daily": 1,
+    "Weekly": 7,
+    "1 Month": 30,
+    "2 Months": 60,
+    "3 Months": 90,
+    "6 Months": 180,
+    "1 Year": 365,
+    "2 Years": 730,
+    "3 Years": 1095,
+}
 
-all_repos = []
+# ============================================================
+# EXCEL HEADERS
+# ============================================================
 
-for page in range(1, 6):
+HEADERS_EXCEL = [
+    "Rank",
+    "Repository",
+    "Stars",
+    "Age (Days)",
+    "Created",
+    "Forks",
+    "Watchers",
+    "Open Issues",
+    "Language",
+    "Description",
+    "Last Updated",
+    "Last Push",
+    "URL"
+]
 
-    print(f"📡 Fetching page {page}/5...")
+# ============================================================
+# HELPER: GITHUB API REQUEST
+# ============================================================
 
-    params = {
-        "q": "stars:>0",
-        "sort": "stars",
-        "order": "desc",
-        "per_page": 100,
-        "page": page
-    }
+def github_search(params):
 
     response = requests.get(
         API_URL,
@@ -68,94 +106,244 @@ for page in range(1, 6):
         timeout=60
     )
 
-    # Show useful error if GitHub rejects request
     if response.status_code != 200:
+
         print("❌ GitHub API request failed")
         print(f"HTTP Status: {response.status_code}")
         print(f"Response: {response.text[:1000]}")
+
         response.raise_for_status()
 
-    data = response.json()
+    return response.json()
 
-    repos = data.get("items", [])
 
-    all_repos.extend(repos)
+# ============================================================
+# HELPER: FETCH ALL RESULTS FOR QUERY
+# ============================================================
 
-    print(
-        f"✅ Page {page}/5 fetched — "
-        f"{len(repos)} repositories"
+def fetch_repositories(query, max_pages=10):
+
+    repositories = []
+
+    for page in range(1, max_pages + 1):
+
+        params = {
+            "q": query,
+            "sort": "stars",
+            "order": "desc",
+            "per_page": 100,
+            "page": page
+        }
+
+        print(
+            f"   📡 Page {page}/{max_pages}..."
+        )
+
+        data = github_search(params)
+
+        items = data.get("items", [])
+
+        if not items:
+            break
+
+        repositories.extend(items)
+
+        # GitHub search has a practical result limit.
+        total_count = data.get("total_count", 0)
+
+        if len(repositories) >= total_count:
+            break
+
+        if len(items) < 100:
+            break
+
+        time.sleep(1)
+
+    return repositories
+
+
+# ============================================================
+# START
+# ============================================================
+
+print("=" * 80)
+print("🚀 GITHUB AGE-BASED TOP REPOSITORY RANKING")
+print("=" * 80)
+
+now = datetime.now(timezone.utc)
+
+print(f"🕒 Current UTC time: {now.isoformat()}")
+
+# ============================================================
+# FETCH REPOSITORIES
+# ============================================================
+#
+# IMPORTANT:
+#
+# We don't simply fetch the global Top 500 anymore.
+#
+# We fetch repositories by creation-date ranges so that
+# highly-starred NEW repositories aren't missed.
+#
+# ============================================================
+
+print()
+print("🔎 Fetching repositories by age...")
+
+all_repos = {}
+
+# ------------------------------------------------------------
+# Maximum age we need
+# ------------------------------------------------------------
+
+max_age_days = max(INTERVALS.values())
+
+oldest_date = (
+    now - timedelta(days=max_age_days)
+).strftime("%Y-%m-%d")
+
+today_date = now.strftime("%Y-%m-%d")
+
+# Search repositories created within the maximum age window.
+#
+# GitHub's search result limit means we use several smaller
+# age buckets instead of one enormous search.
+# ------------------------------------------------------------
+
+SEARCH_BUCKETS = [
+    ("0-1d", 1),
+    ("1-7d", 7),
+    ("7-30d", 30),
+    ("30-90d", 90),
+    ("90-180d", 180),
+    ("180-365d", 365),
+    ("365-730d", 730),
+    ("730-1095d", 1095),
+]
+
+previous_days = 0
+
+for bucket_name, bucket_end_days in SEARCH_BUCKETS:
+
+    start_date = (
+        now - timedelta(days=bucket_end_days)
+    ).strftime("%Y-%m-%d")
+
+    if previous_days == 0:
+        end_date = today_date
+    else:
+        end_date = (
+            now - timedelta(days=previous_days)
+        ).strftime("%Y-%m-%d")
+
+    query = (
+        f"created:{start_date}..{end_date}"
+        " stars:>0"
     )
 
-    time.sleep(1)
+    print()
+    print(
+        f"🔹 Bucket {bucket_name}: "
+        f"{start_date} → {end_date}"
+    )
+
+    try:
+
+        repos = fetch_repositories(
+            query,
+            max_pages=10
+        )
+
+        print(
+            f"   ✅ Retrieved {len(repos)} repositories"
+        )
+
+        for repo in repos:
+            all_repos[repo["id"]] = repo
+
+    except Exception as e:
+
+        print(
+            f"   ⚠️ Failed bucket {bucket_name}: {e}"
+        )
+
+    previous_days = bucket_end_days
 
 # ============================================================
-# REMOVE DUPLICATES
+# ALL-TIME TOP 500
+# ============================================================
+#
+# All Time is handled separately.
 # ============================================================
 
-unique_repos = {
-    repo["id"]: repo
-    for repo in all_repos
-}
+print()
+print("🌎 Fetching All-Time Top repositories...")
 
-all_repos = list(unique_repos.values())
-
-# ============================================================
-# SORT BY STARS
-# ============================================================
-
-all_repos.sort(
-    key=lambda x: x["stargazers_count"],
-    reverse=True
+all_time_repos = fetch_repositories(
+    "stars:>0",
+    max_pages=5
 )
 
-all_repos = all_repos[:500]
+for repo in all_time_repos:
+    all_repos[repo["id"]] = repo
+
+print(
+    f"✅ Total unique repositories collected: "
+    f"{len(all_repos)}"
+)
+
+if not all_repos:
+    raise RuntimeError(
+        "No repositories were returned by GitHub."
+    )
+
+# ============================================================
+# CALCULATE AGE
+# ============================================================
+
+processed_repos = []
+
+for repo in all_repos.values():
+
+    created_string = repo.get("created_at")
+
+    if not created_string:
+        continue
+
+    try:
+
+        created_at = datetime.fromisoformat(
+            created_string.replace("Z", "+00:00")
+        )
+
+        age_seconds = (
+            now - created_at
+        ).total_seconds()
+
+        age_days = age_seconds / 86400
+
+    except Exception:
+        continue
+
+    repo_copy = dict(repo)
+
+    repo_copy["_age_days"] = age_days
+
+    processed_repos.append(repo_copy)
+
+print(
+    f"✅ Processed {len(processed_repos)} repositories"
+)
+
+# ============================================================
+# OPEN EXCEL
+# ============================================================
 
 print()
-print(f"✅ Retrieved {len(all_repos)} unique repositories")
-
-if len(all_repos) == 0:
-    raise RuntimeError("GitHub API returned zero repositories.")
-
-# ============================================================
-# CURRENT SNAPSHOT DATE
-# ============================================================
-
-today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-print(f"📅 Snapshot date: {today}")
-
-# ============================================================
-# BUILD ROWS
-# ============================================================
-
-rows = []
-
-for rank, repo in enumerate(all_repos, start=1):
-
-    rows.append([
-        today,
-        rank,
-        repo.get("full_name", ""),
-        repo.get("stargazers_count", 0),
-        repo.get("forks_count", 0),
-        repo.get("watchers_count", 0),
-        repo.get("open_issues_count", 0),
-        repo.get("language") or "Unknown",
-        repo.get("description") or "",
-        repo.get("created_at", "")[:10],
-        repo.get("updated_at", "")[:10],
-        repo.get("pushed_at", "")[:10],
-        repo.get("html_url", "")
-    ])
-
-# ============================================================
-# OPEN EXISTING EXCEL WORKBOOK
-# ============================================================
-
-print()
-print(f"📂 Opening: {EXCEL_FILE}")
+print(f"📂 Opening Excel: {EXCEL_FILE}")
 
 if not os.path.exists(EXCEL_FILE):
+
     raise FileNotFoundError(
         f"Excel file not found: {EXCEL_FILE}"
     )
@@ -168,165 +356,397 @@ print(
 )
 
 # ============================================================
-# DAILY SHEET
+# CREATE / UPDATE INTERVAL SHEETS
 # ============================================================
 
-if "Daily" in wb.sheetnames:
+for sheet_name, max_days in INTERVALS.items():
 
-    ws = wb["Daily"]
+    print()
+    print("=" * 80)
+    print(
+        f"📊 {sheet_name.upper()} "
+        f"(AGE <= {max_days} DAYS)"
+    )
+    print("=" * 80)
 
-    print("✅ Using existing 'Daily' sheet")
+    # --------------------------------------------------------
+    # Filter by age
+    # --------------------------------------------------------
 
-else:
+    eligible = [
+        repo
+        for repo in processed_repos
+        if repo["_age_days"] <= max_days
+    ]
 
-    ws = wb.create_sheet("Daily")
+    # --------------------------------------------------------
+    # Sort by CURRENT TOTAL STARS
+    # --------------------------------------------------------
 
-    print("🆕 Created 'Daily' sheet")
+    eligible.sort(
+        key=lambda x: x.get(
+            "stargazers_count", 0
+        ),
+        reverse=True
+    )
 
-# ============================================================
-# HEADERS
-# ============================================================
+    # Top N
+    eligible = eligible[:TOP_N]
 
-headers = [
-    "Date",
-    "Rank",
-    "Repository",
-    "Stars",
-    "Forks",
-    "Watchers",
-    "Open Issues",
-    "Language",
-    "Description",
-    "Created",
-    "Last Updated",
-    "Last Push",
-    "URL"
-]
+    print(
+        f"✅ Eligible repositories: {len(eligible)}"
+    )
 
-# Check whether the sheet already has headers
-first_row = [
-    ws.cell(row=1, column=i).value
-    for i in range(1, len(headers) + 1)
-]
+    # --------------------------------------------------------
+    # Create or access sheet
+    # --------------------------------------------------------
 
-if first_row != headers:
+    if sheet_name in wb.sheetnames:
 
-    print("📝 Setting/updating Daily sheet headers")
+        ws = wb[sheet_name]
 
-    for col, header in enumerate(headers, start=1):
+        # Clear existing sheet contents
+        if ws.max_row > 0:
+
+            ws.delete_rows(
+                1,
+                ws.max_row
+            )
+
+    else:
+
+        ws = wb.create_sheet(
+            sheet_name
+        )
+
+    # --------------------------------------------------------
+    # Headers
+    # --------------------------------------------------------
+
+    for col, header in enumerate(
+        HEADERS_EXCEL,
+        start=1
+    ):
+
         ws.cell(
             row=1,
             column=col,
             value=header
         )
 
+    # --------------------------------------------------------
+    # Data
+    # --------------------------------------------------------
+
+    for rank, repo in enumerate(
+        eligible,
+        start=1
+    ):
+
+        created_at = repo.get(
+            "created_at",
+            ""
+        )
+
+        if created_at:
+            created_date = created_at[:10]
+        else:
+            created_date = ""
+
+        row = [
+
+            rank,
+
+            repo.get(
+                "full_name",
+                ""
+            ),
+
+            repo.get(
+                "stargazers_count",
+                0
+            ),
+
+            round(
+                repo.get(
+                    "_age_days",
+                    0
+                ),
+                2
+            ),
+
+            created_date,
+
+            repo.get(
+                "forks_count",
+                0
+            ),
+
+            repo.get(
+                "watchers_count",
+                0
+            ),
+
+            repo.get(
+                "open_issues_count",
+                0
+            ),
+
+            repo.get(
+                "language"
+            ) or "Unknown",
+
+            repo.get(
+                "description"
+            ) or "",
+
+            repo.get(
+                "updated_at",
+                ""
+            )[:10],
+
+            repo.get(
+                "pushed_at",
+                ""
+            )[:10],
+
+            repo.get(
+                "html_url",
+                ""
+            )
+        ]
+
+        ws.append(row)
+
+    # --------------------------------------------------------
+    # Formatting
+    # --------------------------------------------------------
+
+    ws.freeze_panes = "A2"
+
+    ws.auto_filter.ref = ws.dimensions
+
+    widths = {
+        "A": 8,
+        "B": 45,
+        "C": 14,
+        "D": 14,
+        "E": 14,
+        "F": 14,
+        "G": 14,
+        "H": 16,
+        "I": 18,
+        "J": 60,
+        "K": 16,
+        "L": 16,
+        "M": 60
+    }
+
+    for column, width in widths.items():
+
+        ws.column_dimensions[
+            column
+        ].width = width
+
+    print(
+        f"🏆 #1: "
+        f"{eligible[0]['full_name'] if eligible else 'N/A'}"
+    )
+
+    if eligible:
+
+        print(
+            f"⭐ Stars: "
+            f"{eligible[0].get('stargazers_count', 0):,}"
+        )
+
 # ============================================================
-# CHECK FOR DUPLICATE DATE
+# ALL TIME
 # ============================================================
 
 print()
-print(f"🔍 Checking whether {today} already exists...")
+print("=" * 80)
+print("🌎 ALL TIME")
+print("=" * 80)
 
-existing_dates = set()
+if "All Time" in wb.sheetnames:
 
-if ws.max_row >= 2:
+    ws = wb["All Time"]
 
-    for row in ws.iter_rows(
-        min_row=2,
-        min_col=1,
-        max_col=1,
-        values_only=True
-    ):
-
-        value = row[0]
-
-        if value is not None:
-
-            if hasattr(value, "strftime"):
-                date_value = value.strftime("%Y-%m-%d")
-            else:
-                date_value = str(value)[:10]
-
-            existing_dates.add(date_value)
-
-# ============================================================
-# APPEND TODAY'S DATA
-# ============================================================
-
-if today in existing_dates:
-
-    print(
-        f"⚠️ A snapshot for {today} already exists."
-    )
-
-    print(
-        "⚠️ No duplicate rows will be added."
-    )
+    if ws.max_row > 0:
+        ws.delete_rows(1, ws.max_row)
 
 else:
 
-    print(
-        f"📊 Adding {len(rows)} repositories "
-        f"for {today}..."
+    ws = wb.create_sheet("All Time")
+
+# Headers
+
+for col, header in enumerate(
+    HEADERS_EXCEL,
+    start=1
+):
+
+    ws.cell(
+        row=1,
+        column=col,
+        value=header
     )
 
-    for row_data in rows:
-        ws.append(row_data)
+# Sort every collected repository by stars
 
-    print(
-        f"✅ Added {len(rows)} repositories "
-        f"for {today}"
+all_time_sorted = sorted(
+    processed_repos,
+    key=lambda x: x.get(
+        "stargazers_count",
+        0
+    ),
+    reverse=True
+)
+
+all_time_sorted = all_time_sorted[:TOP_N]
+
+for rank, repo in enumerate(
+    all_time_sorted,
+    start=1
+):
+
+    created_at = repo.get(
+        "created_at",
+        ""
     )
 
-# ============================================================
-# EXCEL FORMATTING
-# ============================================================
+    row = [
+
+        rank,
+
+        repo.get(
+            "full_name",
+            ""
+        ),
+
+        repo.get(
+            "stargazers_count",
+            0
+        ),
+
+        round(
+            repo.get(
+                "_age_days",
+                0
+            ),
+            2
+        ),
+
+        created_at[:10],
+
+        repo.get(
+            "forks_count",
+            0
+        ),
+
+        repo.get(
+            "watchers_count",
+            0
+        ),
+
+        repo.get(
+            "open_issues_count",
+            0
+        ),
+
+        repo.get(
+            "language"
+        ) or "Unknown",
+
+        repo.get(
+            "description"
+        ) or "",
+
+        repo.get(
+            "updated_at",
+            ""
+        )[:10],
+
+        repo.get(
+            "pushed_at",
+            ""
+        )[:10],
+
+        repo.get(
+            "html_url",
+            ""
+        )
+    ]
+
+    ws.append(row)
 
 ws.freeze_panes = "A2"
-
-# Auto-filter
 ws.auto_filter.ref = ws.dimensions
 
-# Column widths
 widths = {
-    "A": 14,
-    "B": 8,
-    "C": 45,
+    "A": 8,
+    "B": 45,
+    "C": 14,
     "D": 14,
     "E": 14,
     "F": 14,
-    "G": 16,
-    "H": 18,
-    "I": 60,
-    "J": 14,
+    "G": 14,
+    "H": 16,
+    "I": 18,
+    "J": 60,
     "K": 16,
-    "L": 14,
+    "L": 16,
     "M": 60
 }
 
 for column, width in widths.items():
-    ws.column_dimensions[column].width = width
+    ws.column_dimensions[
+        column
+    ].width = width
 
 # ============================================================
-# SAVE SAME EXCEL FILE
+# SAVE
 # ============================================================
 
 print()
-print(f"💾 Saving: {EXCEL_FILE}")
+print("=" * 80)
+print("💾 SAVING EXCEL")
+print("=" * 80)
 
 wb.save(EXCEL_FILE)
 
-# ============================================================
-# FINAL STATUS
-# ============================================================
+print()
+print("=" * 80)
+print("🎉 GITHUB AGE-BASED RANKING UPDATE COMPLETE")
+print("=" * 80)
+
+print(
+    f"📅 Snapshot: {now.strftime('%Y-%m-%d %H:%M UTC')}"
+)
+
+print(
+    f"📊 Repositories collected: "
+    f"{len(processed_repos)}"
+)
+
+print(
+    f"📁 Excel: {EXCEL_FILE}"
+)
 
 print()
-print("=" * 70)
-print("🎉 COMPLETE")
-print("=" * 70)
-print(f"📅 Date: {today}")
-print(f"📊 Current Top 500: {len(rows)} repositories")
-print(f"📁 Excel: {EXCEL_FILE}")
-print(f"📑 Sheet: Daily")
-print(f"📈 Total Daily rows: {ws.max_row - 1}")
-print("=" * 70)
+print("📑 Ranking logic:")
+
+for name, days in INTERVALS.items():
+
+    print(
+        f"   {name:10} → age <= {days:4} days → "
+        f"ranked by total stars"
+    )
+
+print(
+    "   All Time  → all repositories → "
+    "ranked by total stars"
+)
+
+print("=" * 80)
