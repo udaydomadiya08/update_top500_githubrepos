@@ -12,7 +12,7 @@ API_URL = "https://api.github.com/search/repositories"
 
 EXCEL_FILE = "github_top_repos_by_interval.xlsx"
 
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+GITHUB_TOKEN = os.environ.get("GROW_HUB")
 
 if not GITHUB_TOKEN:
     raise RuntimeError("GITHUB_TOKEN environment variable not found.")
